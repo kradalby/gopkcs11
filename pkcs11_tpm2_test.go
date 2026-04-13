@@ -21,6 +21,12 @@
 package pkcs11
 
 import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/asn1"
+	"math/big"
 	"os"
 	"testing"
 )
@@ -265,6 +271,13 @@ func TestTPM2SignRSA(t *testing.T) {
 	if err := p.Verify(session, data, sig); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
+
+	// Also verify off-token with Go stdlib.
+	rsaPub := extractRSAPublicKey(t, p, session, pub)
+	hash := sha256.Sum256(data)
+	if err := rsa.VerifyPKCS1v15(rsaPub, crypto.SHA256, hash[:], sig); err != nil {
+		t.Fatalf("Go stdlib rsa.VerifyPKCS1v15: %v", err)
+	}
 }
 
 func TestTPM2SignECDSA(t *testing.T) {
@@ -298,6 +311,20 @@ func TestTPM2SignECDSA(t *testing.T) {
 	}
 	if err := p.Verify(session, hash, sig); err != nil {
 		t.Fatalf("Verify: %v", err)
+	}
+
+	// Also verify off-token with Go stdlib.
+	ecPub := extractECPublicKey(t, p, session, pub)
+	half := len(sig) / 2
+	r := new(big.Int).SetBytes(sig[:half])
+	s := new(big.Int).SetBytes(sig[half:])
+	type ecdsaSig struct{ R, S *big.Int }
+	derSig, err := asn1.Marshal(ecdsaSig{R: r, S: s})
+	if err != nil {
+		t.Fatalf("marshal ECDSA DER: %v", err)
+	}
+	if !ecdsa.VerifyASN1(ecPub, hash, derSig) {
+		t.Fatal("Go stdlib ecdsa.VerifyASN1 failed")
 	}
 }
 

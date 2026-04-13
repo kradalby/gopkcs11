@@ -3,6 +3,13 @@
 package pkcs11
 
 import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rsa"
+	"crypto/sha1"
+	"encoding/asn1"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
@@ -216,6 +223,44 @@ func destroyObject(t *testing.T, p *Ctx, session SessionHandle, label string, cl
 			t.Fatalf("DestroyObject: %v", err)
 		}
 	}
+}
+
+// extractRSAPublicKey reads the modulus and exponent from a public key handle
+// and returns a Go *rsa.PublicKey for off-token verification.
+func extractRSAPublicKey(t *testing.T, p *Ctx, session SessionHandle, pub ObjectHandle) *rsa.PublicKey {
+	t.Helper()
+	attrs, err := p.GetAttributeValue(session, pub, []*Attribute{
+		{Type: CKA_MODULUS},
+		{Type: CKA_PUBLIC_EXPONENT},
+	})
+	if err != nil {
+		t.Fatalf("GetAttributeValue RSA pub: %v", err)
+	}
+	n := new(big.Int).SetBytes(attrs[0].Value)
+	e := new(big.Int).SetBytes(attrs[1].Value)
+	return &rsa.PublicKey{N: n, E: int(e.Int64())}
+}
+
+// extractECPublicKey reads the EC point from a public key handle
+// and returns a Go *ecdsa.PublicKey for off-token verification.
+func extractECPublicKey(t *testing.T, p *Ctx, session SessionHandle, pub ObjectHandle) *ecdsa.PublicKey {
+	t.Helper()
+	attrs, err := p.GetAttributeValue(session, pub, []*Attribute{
+		{Type: CKA_EC_POINT},
+	})
+	if err != nil {
+		t.Fatalf("GetAttributeValue EC pub: %v", err)
+	}
+	// PKCS#11 stores EC_POINT as DER-encoded OCTET STRING.
+	var ecPoint []byte
+	if _, err := asn1.Unmarshal(attrs[0].Value, &ecPoint); err != nil {
+		t.Fatalf("unmarshal EC_POINT: %v", err)
+	}
+	x, y := elliptic.Unmarshal(elliptic.P256(), ecPoint) //nolint:staticcheck // needed for PKCS#11 EC point format
+	if x == nil {
+		t.Fatal("failed to unmarshal EC point")
+	}
+	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
 }
 
 // ============================================================
@@ -467,7 +512,7 @@ func TestSign(t *testing.T) {
 	session := getSession(t, p, slotID)
 	defer finishSession(t, p, session)
 
-	_, priv := generateRSAKeyPair(t, p, session, "signtest", false)
+	pub, priv := generateRSAKeyPair(t, p, session, "signtest", false)
 
 	if err := p.SignInit(session, []*Mechanism{NewMechanism(CKM_SHA1_RSA_PKCS, nil)}, priv); err != nil {
 		t.Fatalf("SignInit: %v", err)
@@ -482,6 +527,13 @@ func TestSign(t *testing.T) {
 		t.Error("Signature is empty")
 	}
 	t.Logf("Signature length: %d bytes", len(sig))
+
+	// Verify off-token with Go stdlib.
+	rsaPub := extractRSAPublicKey(t, p, session, pub)
+	hash := sha1.Sum(data)
+	if err := rsa.VerifyPKCS1v15(rsaPub, crypto.SHA1, hash[:], sig); err != nil {
+		t.Fatalf("Go stdlib rsa.VerifyPKCS1v15: %v", err)
+	}
 }
 
 func TestSignVerifyRoundTrip(t *testing.T) {
@@ -507,6 +559,13 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 	}
 	if err := p.Verify(session, data, sig); err != nil {
 		t.Fatalf("Verify: %v", err)
+	}
+
+	// Also verify off-token with Go stdlib.
+	rsaPub := extractRSAPublicKey(t, p, session, pub)
+	hash := sha1.Sum(data)
+	if err := rsa.VerifyPKCS1v15(rsaPub, crypto.SHA1, hash[:], sig); err != nil {
+		t.Fatalf("Go stdlib rsa.VerifyPKCS1v15: %v", err)
 	}
 }
 
@@ -539,6 +598,21 @@ func TestSignECDSA(t *testing.T) {
 	}
 	if err := p.Verify(session, data, sig); err != nil {
 		t.Fatalf("Verify ECDSA: %v", err)
+	}
+
+	// Also verify off-token with Go stdlib.
+	ecPub := extractECPublicKey(t, p, session, pub)
+	// Convert PKCS#11 r||s to DER.
+	half := len(sig) / 2
+	r := new(big.Int).SetBytes(sig[:half])
+	s := new(big.Int).SetBytes(sig[half:])
+	type ecdsaSig struct{ R, S *big.Int }
+	derSig, err := asn1.Marshal(ecdsaSig{R: r, S: s})
+	if err != nil {
+		t.Fatalf("marshal ECDSA DER: %v", err)
+	}
+	if !ecdsa.VerifyASN1(ecPub, data, derSig) {
+		t.Fatal("Go stdlib ecdsa.VerifyASN1 failed")
 	}
 }
 
@@ -815,5 +889,12 @@ func TestSignRSAPSS(t *testing.T) {
 	}
 	if err := p.Verify(session, hash, sig); err != nil {
 		t.Fatalf("Verify PSS: %v", err)
+	}
+
+	// Also verify off-token with Go stdlib.
+	rsaPub := extractRSAPublicKey(t, p, session, pub)
+	pssOpts := &rsa.PSSOptions{SaltLength: 32, Hash: crypto.SHA256}
+	if err := rsa.VerifyPSS(rsaPub, crypto.SHA256, hash, sig, pssOpts); err != nil {
+		t.Fatalf("Go stdlib rsa.VerifyPSS: %v", err)
 	}
 }
