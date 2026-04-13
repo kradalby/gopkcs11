@@ -61,6 +61,7 @@ func initToken(t *testing.T, p *Ctx) uint {
 	if err := p.Initialize(); err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
+	t.Cleanup(func() { p.Finalize() })
 
 	slots, err := p.GetSlotList(false)
 	if err != nil {
