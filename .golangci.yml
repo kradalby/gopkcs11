@@ -1,0 +1,80 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - exhaustive
+    - gosec
+    - govet
+    - misspell
+    - nilerr
+    - nolintlint
+    - prealloc
+    - revive
+    - staticcheck
+    - unparam
+    - unused
+  settings:
+    govet:
+      disable:
+        # This library uses unsafe.Pointer arithmetic extensively for FFI.
+        - unsafeptr
+    gosec:
+      excludes:
+        # G103: Use of unsafe calls - fundamental to this FFI library.
+        - G103
+        # G115: Integer overflow conversion - CK_ULONG <-> uint/uintptr is bounded by C ABI.
+        - G115
+    revive:
+      rules:
+        # PKCS#11 constants (CKA_CLASS, CKM_RSA_PKCS, etc.) are OASIS standard names.
+        - name: var-naming
+          disabled: true
+        - name: exported
+          arguments:
+            - "checkPrivateReceivers"
+            - "disableStutteringCheck"
+    exhaustive:
+      default-signifies-exhaustive: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    errcheck:
+      check-type-assertions: true
+  exclusions:
+    rules:
+      # staticcheck ST1003 flags ALL_CAPS names; PKCS#11 constants must use standard naming.
+      - linters:
+          - staticcheck
+        text: "ST1003"
+      # Allow unhandled errors in defer cleanup paths.
+      - linters:
+          - errcheck
+        source: "defer "
+      # Don't require doc comments on every PKCS#11 constant.
+      - linters:
+          - revive
+        text: "exported: exported (const|var) (CK|pkcs11)"
+      # funclist.go field names (C_Initialize, etc.) mirror PKCS#11 C_* symbols intentionally.
+      - path: 'funclist\.go'
+        linters:
+          - revive
+        text: "var-naming"
+      # Relax some strictness in test files.
+      - path: '(.+)_test\.go'
+        linters:
+          - gosec
+          - errcheck
+          - unparam
+          - prealloc
+    paths:
+      - third_party$
+      - builtin$
+
+formatters:
+  enable:
+    - gofumpt
+  settings:
+    gofumpt:
+      extra-rules: true

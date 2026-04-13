@@ -1,0 +1,5 @@
+.softhsm/
+test_data/
+*.test
+*.out
+result
