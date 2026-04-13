@@ -11,6 +11,7 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         softhsm2-lib = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
+        tpm2-pkcs11-lib = "${pkgs.tpm2-pkcs11}/lib/libtpm2_pkcs11.so";
       in
       {
         devShells.default = pkgs.mkShell {
@@ -19,6 +20,11 @@
             pkgs.softhsm
             pkgs.golangci-lint
             pkgs.opensc
+
+            # TPM2 PKCS#11 support (for //go:build tpm2 integration tests)
+            pkgs.tpm2-pkcs11
+            pkgs.tpm2-pkcs11.bin
+            pkgs.tpm2-tools
           ];
 
           shellHook = ''
@@ -40,11 +46,12 @@
             fi
 
             export SOFTHSM_LIB="${softhsm2-lib}"
+            export TPM2_PKCS11_LIB="${tpm2-pkcs11-lib}"
 
             echo "gopkcs11 dev shell"
-            echo "  CGO_ENABLED = $CGO_ENABLED"
-            echo "  SOFTHSM_LIB = $SOFTHSM_LIB"
-            echo "  SOFTHSM2_CONF = $SOFTHSM2_CONF"
+            echo "  CGO_ENABLED    = $CGO_ENABLED"
+            echo "  SOFTHSM_LIB    = $SOFTHSM_LIB"
+            echo "  TPM2_PKCS11_LIB = $TPM2_PKCS11_LIB"
           '';
         };
       }
