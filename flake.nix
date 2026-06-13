@@ -23,23 +23,36 @@
         };
 
         softhsm2-lib = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
-        tpm2-pkcs11-lib =
-          if pkgs.stdenv.isLinux
-          then "${pkgs.tpm2-pkcs11}/lib/libtpm2_pkcs11.so"
-          else "";
-      in
-      {
-        packages.default = fc.goBuild common;
 
-        formatter = fc.formatter common;
-
-        checks = {
-          build = fc.goBuild common;
-          gotest = fc.goTest common;
-          golangci-lint = fc.goLint common;
-          formatting = fc.goFormat common;
+        # The package is //go:build linux throughout, so the Go checks only
+        # exist on Linux (CI runs x86_64-linux). The softhsm integration tests
+        # hard-fail without a module, so gotest provides softhsm + config.
+        goOutputs = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          packages.default = fc.goBuild common;
+          formatter = fc.formatter common;
+          checks = {
+            build = fc.goBuild common;
+            golangci-lint = fc.goLint common;
+            formatting = fc.goFormat common;
+            gotest = fc.goTest (common // {
+              nativeCheckInputs = [ pkgs.softhsm ];
+              testEnv = ''
+                export SOFTHSM_LIB=${softhsm2-lib}
+                export SOFTHSM_TOKENS_DIR=$TMPDIR/tokens
+                mkdir -p $SOFTHSM_TOKENS_DIR
+                export SOFTHSM2_CONF=$TMPDIR/softhsm2.conf
+                {
+                  echo "directories.tokendir = $SOFTHSM_TOKENS_DIR"
+                  echo "objectstore.backend = file"
+                  echo "log.level = INFO"
+                  echo "slots.removable = false"
+                } > $SOFTHSM2_CONF
+              '';
+            });
+          };
         };
-
+      in
+      goOutputs // {
         devShells.default = pkgs.mkShell {
           buildInputs = [
             pkgs.go
@@ -74,12 +87,10 @@
             fi
 
             export SOFTHSM_LIB="${softhsm2-lib}"
-            export TPM2_PKCS11_LIB="${tpm2-pkcs11-lib}"
 
             echo "gopkcs11 dev shell"
-            echo "  CGO_ENABLED    = $CGO_ENABLED"
-            echo "  SOFTHSM_LIB    = $SOFTHSM_LIB"
-            echo "  TPM2_PKCS11_LIB = $TPM2_PKCS11_LIB"
+            echo "  CGO_ENABLED = $CGO_ENABLED"
+            echo "  SOFTHSM_LIB = $SOFTHSM_LIB"
           '';
         };
       }
