@@ -6,6 +6,7 @@
     flake-utils.url = "github:numtide/flake-utils";
     flake-checks.url = "github:kradalby/flake-checks";
     flake-checks.inputs.nixpkgs.follows = "nixpkgs";
+    flake-checks.inputs.flake-utils.follows = "flake-utils";
   };
 
   outputs = { self, nixpkgs, flake-utils, flake-checks }:
@@ -55,9 +56,12 @@
       goOutputs // {
         devShells.default = pkgs.mkShell {
           buildInputs = [
-            pkgs.go
-            pkgs.softhsm
+            pkgs.go_1_26
+            pkgs.gopls
+            pkgs.gofumpt
             pkgs.golangci-lint
+            pkgs.prek
+            pkgs.softhsm
             pkgs.opensc
           ]
           # TPM2 PKCS#11 support (for //go:build tpm2 integration tests) is
