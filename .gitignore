@@ -3,3 +3,6 @@ test_data/
 *.test
 *.out
 result
+result-*
+.envrc.local
+.claude/settings.local.json
