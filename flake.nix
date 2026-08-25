@@ -9,11 +9,18 @@
     flake-checks.inputs.flake-utils.follows = "flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils, flake-checks }:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+      flake-checks,
+    }:
     # nixpkgs 26.11 dropped x86_64-darwin, and importing it for that system
     # throws at eval time, so enumerate the systems still supported instead of
     # using eachDefaultSystem.
-    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ] (system:
+    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ] (
+      system:
       let
         # Build the Go toolchain and Go-based dev tools against the latest Go
         # (go_latest / buildGoLatestModule) rather than the default `go`, which
@@ -61,29 +68,36 @@
             # invisible to `go generate ./...` and must be named as a file
             # path; pkcs11t.h is not a .go file, so the src filter needs it
             # spelled out or the generator has nothing to read.
-            generate = fc.goGenerate (common // {
-              extraSrc = [ ./pkcs11t.h ];
-              generateCommand = "go run ./cmd/constgen/main.go";
-            });
-            gotest = fc.goTest (common // {
-              nativeCheckInputs = [ pkgs.softhsm ];
-              testEnv = ''
-                export SOFTHSM_LIB=${softhsm2-lib}
-                export SOFTHSM_TOKENS_DIR=$TMPDIR/tokens
-                mkdir -p $SOFTHSM_TOKENS_DIR
-                export SOFTHSM2_CONF=$TMPDIR/softhsm2.conf
-                {
-                  echo "directories.tokendir = $SOFTHSM_TOKENS_DIR"
-                  echo "objectstore.backend = file"
-                  echo "log.level = INFO"
-                  echo "slots.removable = false"
-                } > $SOFTHSM2_CONF
-              '';
-            });
+            generate = fc.goGenerate (
+              common
+              // {
+                extraSrc = [ ./pkcs11t.h ];
+                generateCommand = "go run ./cmd/constgen/main.go";
+              }
+            );
+            gotest = fc.goTest (
+              common
+              // {
+                nativeCheckInputs = [ pkgs.softhsm ];
+                testEnv = ''
+                  export SOFTHSM_LIB=${softhsm2-lib}
+                  export SOFTHSM_TOKENS_DIR=$TMPDIR/tokens
+                  mkdir -p $SOFTHSM_TOKENS_DIR
+                  export SOFTHSM2_CONF=$TMPDIR/softhsm2.conf
+                  {
+                    echo "directories.tokendir = $SOFTHSM_TOKENS_DIR"
+                    echo "objectstore.backend = file"
+                    echo "log.level = INFO"
+                    echo "slots.removable = false"
+                  } > $SOFTHSM2_CONF
+                '';
+              }
+            );
           };
         };
       in
-      goOutputs // {
+      goOutputs
+      // {
         devShells.default = pkgs.mkShell {
           buildInputs = [
             pkgs.go_latest
