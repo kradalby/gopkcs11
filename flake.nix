@@ -10,17 +10,38 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, flake-checks }:
-    flake-utils.lib.eachDefaultSystem (system:
+    # nixpkgs 26.11 dropped x86_64-darwin, and importing it for that system
+    # throws at eval time, so enumerate the systems still supported instead of
+    # using eachDefaultSystem.
+    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ] (system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
+        # Build the Go toolchain and Go-based dev tools against the latest Go
+        # (go_latest / buildGoLatestModule) rather than the default `go`, which
+        # still resolves to an older release in nixpkgs. golangci-lint and gopls
+        # already track go_latest upstream, so only gofumpt and gotools need the
+        # override. goimports (gotools) ships wrapped with a `go` on PATH, and
+        # that `go` must be at least the go.mod directive or GOTOOLCHAIN=auto
+        # tries to fetch a toolchain inside the network-less treefmt sandbox.
+        goOverlay = _: prev: {
+          gofumpt = prev.gofumpt.override { buildGoModule = prev.buildGoLatestModule; };
+          gotools = prev.gotools.override {
+            buildGoModule = prev.buildGoLatestModule;
+            go = prev.go_latest;
+          };
+        };
+
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ goOverlay ];
+        };
         fc = flake-checks.lib;
         common = {
           inherit pkgs;
           root = ./.;
           pname = "gopkcs11";
           version = "0.0.1";
-          vendorHash = "sha256-qapWMnRP6ZzRIelgJ8vdi7lvbApjKKvbIDoZMn8s9u4=";
-          goPkg = pkgs.go_1_26;
+          vendorHash = "sha256-6GrpGXYZAu5/BtixQpPe2LeEqLPbsAIDC6ZlNqh3ig0=";
+          goPkg = pkgs.go_latest;
         };
 
         softhsm2-lib = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
@@ -28,7 +49,7 @@
         # The package is //go:build linux throughout, so the Go checks only
         # exist on Linux (CI runs x86_64-linux). The softhsm integration tests
         # hard-fail without a module, so gotest provides softhsm + config.
-        goOutputs = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+        goOutputs = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           packages.default = fc.goBuild common;
           formatter = fc.formatter common;
           checks = {
@@ -56,7 +77,7 @@
       goOutputs // {
         devShells.default = pkgs.mkShell {
           buildInputs = [
-            pkgs.go_1_26
+            pkgs.go_latest
             pkgs.gopls
             pkgs.gofumpt
             pkgs.golangci-lint
@@ -66,7 +87,7 @@
           ]
           # TPM2 PKCS#11 support (for //go:build tpm2 integration tests) is
           # Linux-only; keep the dev shell evaluable on Darwin.
-          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.tpm2-pkcs11
             pkgs.tpm2-pkcs11.bin
             pkgs.tpm2-tools
