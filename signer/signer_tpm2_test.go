@@ -182,11 +182,11 @@ func tpm2ReadPublicKey(t *testing.T, keyType uint) crypto.PublicKey {
 		if _, err := asn1.Unmarshal(attrs[0].Value, &ecPoint); err != nil {
 			t.Fatalf("unmarshal EC_POINT: %v", err)
 		}
-		x, y := elliptic.Unmarshal(elliptic.P256(), ecPoint) //nolint:staticcheck // needed for PKCS#11 EC point format
-		if x == nil {
-			t.Skip("EC point not P-256, skipping")
+		key, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), ecPoint)
+		if err != nil {
+			t.Skipf("EC point not P-256, skipping: %v", err)
 		}
-		return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
+		return key
 
 	default:
 		t.Fatalf("unsupported key type: %d", keyType)
