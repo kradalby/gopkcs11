@@ -98,7 +98,10 @@ func (m *mockCtx) FindObjects(_ pkcs11.SessionHandle, _ int) ([]pkcs11.ObjectHan
 	}
 
 	ecParams, _ := asn1.Marshal(asn1.ObjectIdentifier{1, 2, 840, 10045, 3, 1, 7})
-	ecPoint := elliptic.Marshal(testECPubKey.Curve, testECPubKey.X, testECPubKey.Y) //nolint:staticcheck // PKCS#11 requires uncompressed EC point format
+	ecPoint, err := testECPubKey.Bytes()
+	if err != nil {
+		return nil, false, err
+	}
 	ecPointDER, _ := asn1.Marshal(ecPoint)
 	ecPubTemplate := []*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_PUBLIC_KEY),
@@ -659,16 +662,12 @@ func generateECKeyAndGetPublic(t *testing.T, lib, tokenLabel, pin string) *ecdsa
 		t.Fatal(err)
 	}
 
-	x, y := elliptic.Unmarshal(elliptic.P256(), ecPoint) //nolint:staticcheck // PKCS#11 returns uncompressed EC point format
-	if x == nil {
-		t.Fatal("Failed to unmarshal EC point")
+	key, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), ecPoint)
+	if err != nil {
+		t.Fatalf("parse EC point: %v", err)
 	}
 
-	return &ecdsa.PublicKey{
-		Curve: elliptic.P256(),
-		X:     x,
-		Y:     y,
-	}
+	return key
 }
 
 func TestIntegrationECDSASignVerify(t *testing.T) {

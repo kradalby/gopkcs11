@@ -256,11 +256,11 @@ func extractECPublicKey(t *testing.T, p *Ctx, session SessionHandle, pub ObjectH
 	if _, err := asn1.Unmarshal(attrs[0].Value, &ecPoint); err != nil {
 		t.Fatalf("unmarshal EC_POINT: %v", err)
 	}
-	x, y := elliptic.Unmarshal(elliptic.P256(), ecPoint) //nolint:staticcheck // needed for PKCS#11 EC point format
-	if x == nil {
-		t.Fatal("failed to unmarshal EC point")
+	key, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), ecPoint)
+	if err != nil {
+		t.Fatalf("parse EC point: %v", err)
 	}
-	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
+	return key
 }
 
 // ============================================================

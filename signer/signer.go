@@ -195,7 +195,13 @@ func (k *Key) getPublicKeyID(session pkcs11.SessionHandle) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		ecPoint := elliptic.Marshal(pub.Curve, pub.X, pub.Y) //nolint:staticcheck // PKCS#11 requires uncompressed EC point format; crypto/ecdh doesn't expose raw X/Y
+		// PKCS#11 wants the uncompressed EC point (SEC 1 v2.0 §2.3.3), which is
+		// exactly what PublicKey.Bytes returns. Unlike the deprecated
+		// elliptic.Marshal, it rejects invalid points instead of being undefined.
+		ecPoint, err := pub.Bytes()
+		if err != nil {
+			return nil, fmt.Errorf("pkcs11key: encode EC point: %w", err)
+		}
 		// PKCS#11 stores EC_POINT as DER-encoded OCTET STRING.
 		ecPointDER, err := asn1.Marshal(ecPoint)
 		if err != nil {
