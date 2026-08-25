@@ -56,6 +56,15 @@
             build = fc.goBuild common;
             golangci-lint = fc.goLint common;
             formatting = fc.goFormat common;
+            # zconst.go / zerror_strings.go are derived from the vendored
+            # PKCS#11 v2.40 header. constgen is //go:build ignore, so it is
+            # invisible to `go generate ./...` and must be named as a file
+            # path; pkcs11t.h is not a .go file, so the src filter needs it
+            # spelled out or the generator has nothing to read.
+            generate = fc.goGenerate (common // {
+              extraSrc = [ ./pkcs11t.h ];
+              generateCommand = "go run ./cmd/constgen/main.go";
+            });
             gotest = fc.goTest (common // {
               nativeCheckInputs = [ pkgs.softhsm ];
               testEnv = ''
