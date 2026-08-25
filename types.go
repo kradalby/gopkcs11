@@ -89,7 +89,7 @@ type Attribute struct {
 
 // NewAttribute creates an Attribute from various Go types.
 // Supported types: bool, int, uint, uint32, uint64, string, []byte, time.Time.
-func NewAttribute(typ uint, x interface{}) *Attribute {
+func NewAttribute(typ uint, x any) *Attribute {
 	a := &Attribute{Type: typ}
 	switch v := x.(type) {
 	case bool:
@@ -134,12 +134,12 @@ func uintToBytes(v uint64) []byte {
 type Mechanism struct {
 	Mechanism uint
 	Parameter []byte
-	generator interface{}
+	generator any
 }
 
 // NewMechanism creates a Mechanism. The parameter x can be nil, []byte,
 // *GCMParams, *OAEPParams, *ECDH1DeriveParams, or *RSAAESKeyWrapParams.
-func NewMechanism(mech uint, x interface{}) *Mechanism {
+func NewMechanism(mech uint, x any) *Mechanism {
 	m := &Mechanism{Mechanism: mech}
 	switch v := x.(type) {
 	case nil:
