@@ -285,10 +285,7 @@ func TestPKCS11ToRFC5480Signature(t *testing.T) {
 	// Pad to equal length.
 	rBytes := r.Bytes()
 	sBytes := s.Bytes()
-	maxLen := len(rBytes)
-	if len(sBytes) > maxLen {
-		maxLen = len(sBytes)
-	}
+	maxLen := max(len(sBytes), len(rBytes))
 	padded := make([]byte, maxLen*2)
 	copy(padded[maxLen-len(rBytes):maxLen], rBytes)
 	copy(padded[2*maxLen-len(sBytes):], sBytes)
