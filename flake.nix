@@ -47,7 +47,7 @@
           root = ./.;
           pname = "gopkcs11";
           version = "0.0.1";
-          vendorHash = "sha256-6GrpGXYZAu5/BtixQpPe2LeEqLPbsAIDC6ZlNqh3ig0=";
+          vendorHash = "sha256-aFsBTavLgOD/jIrJ916kkiKmBRqW3P0fLw5cU4LzWik=";
           goPkg = pkgs.go_latest;
         };
 
