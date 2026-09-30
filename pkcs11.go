@@ -60,6 +60,10 @@ func (c *Ctx) Initialize(opts ...InitializeOption) error {
 
 	var pinner runtime.Pinner
 	pinner.Pin(&cArgs[0])
+	if args.reserved != nil {
+		// Pin ignores non-Go pointers, so C memory passes through untouched.
+		pinner.Pin(args.reserved)
+	}
 	defer pinner.Unpin()
 
 	rv, _, _ := purego.SyscallN(c.fl.C_Initialize, uintptr(unsafe.Pointer(&cArgs[0])))
@@ -553,7 +557,10 @@ func (c *Ctx) FindObjectsFinal(sh SessionHandle) error {
 func (c *Ctx) EncryptInit(sh SessionHandle, m []*Mechanism, o ObjectHandle) error {
 	var a arena
 	defer a.free()
-	mechPtr := a.marshalMechanism(m)
+	mechPtr, err := a.marshalMechanism(m)
+	if err != nil {
+		return err
+	}
 	rv, _, _ := purego.SyscallN(c.fl.C_EncryptInit, uintptr(sh), mechPtr, uintptr(o))
 	return toError(rv)
 }
@@ -577,7 +584,10 @@ func (c *Ctx) EncryptFinal(sh SessionHandle) ([]byte, error) {
 func (c *Ctx) DecryptInit(sh SessionHandle, m []*Mechanism, o ObjectHandle) error {
 	var a arena
 	defer a.free()
-	mechPtr := a.marshalMechanism(m)
+	mechPtr, err := a.marshalMechanism(m)
+	if err != nil {
+		return err
+	}
 	rv, _, _ := purego.SyscallN(c.fl.C_DecryptInit, uintptr(sh), mechPtr, uintptr(o))
 	return toError(rv)
 }
@@ -601,7 +611,10 @@ func (c *Ctx) DecryptFinal(sh SessionHandle) ([]byte, error) {
 func (c *Ctx) DigestInit(sh SessionHandle, m []*Mechanism) error {
 	var a arena
 	defer a.free()
-	mechPtr := a.marshalMechanism(m)
+	mechPtr, err := a.marshalMechanism(m)
+	if err != nil {
+		return err
+	}
 	rv, _, _ := purego.SyscallN(c.fl.C_DigestInit, uintptr(sh), mechPtr)
 	return toError(rv)
 }
@@ -640,7 +653,10 @@ func (c *Ctx) DigestFinal(sh SessionHandle) ([]byte, error) {
 func (c *Ctx) SignInit(sh SessionHandle, m []*Mechanism, o ObjectHandle) error {
 	var a arena
 	defer a.free()
-	mechPtr := a.marshalMechanism(m)
+	mechPtr, err := a.marshalMechanism(m)
+	if err != nil {
+		return err
+	}
 	rv, _, _ := purego.SyscallN(c.fl.C_SignInit, uintptr(sh), mechPtr, uintptr(o))
 	return toError(rv)
 }
@@ -673,7 +689,10 @@ func (c *Ctx) SignFinal(sh SessionHandle) ([]byte, error) {
 func (c *Ctx) SignRecoverInit(sh SessionHandle, m []*Mechanism, key ObjectHandle) error {
 	var a arena
 	defer a.free()
-	mechPtr := a.marshalMechanism(m)
+	mechPtr, err := a.marshalMechanism(m)
+	if err != nil {
+		return err
+	}
 	rv, _, _ := purego.SyscallN(c.fl.C_SignRecoverInit, uintptr(sh), mechPtr, uintptr(key))
 	return toError(rv)
 }
@@ -687,7 +706,10 @@ func (c *Ctx) SignRecover(sh SessionHandle, data []byte) ([]byte, error) {
 func (c *Ctx) VerifyInit(sh SessionHandle, m []*Mechanism, key ObjectHandle) error {
 	var a arena
 	defer a.free()
-	mechPtr := a.marshalMechanism(m)
+	mechPtr, err := a.marshalMechanism(m)
+	if err != nil {
+		return err
+	}
 	rv, _, _ := purego.SyscallN(c.fl.C_VerifyInit, uintptr(sh), mechPtr, uintptr(key))
 	return toError(rv)
 }
@@ -742,7 +764,10 @@ func (c *Ctx) VerifyFinal(sh SessionHandle, signature []byte) error {
 func (c *Ctx) VerifyRecoverInit(sh SessionHandle, m []*Mechanism, key ObjectHandle) error {
 	var a arena
 	defer a.free()
-	mechPtr := a.marshalMechanism(m)
+	mechPtr, err := a.marshalMechanism(m)
+	if err != nil {
+		return err
+	}
 	rv, _, _ := purego.SyscallN(c.fl.C_VerifyRecoverInit, uintptr(sh), mechPtr, uintptr(key))
 	return toError(rv)
 }
@@ -777,7 +802,10 @@ func (c *Ctx) GenerateKey(sh SessionHandle, m []*Mechanism, temp []*Attribute) (
 	var a arena
 	defer a.free()
 
-	mechPtr := a.marshalMechanism(m)
+	mechPtr, err := a.marshalMechanism(m)
+	if err != nil {
+		return 0, err
+	}
 	attrPtr, attrLen := a.marshalAttributes(temp)
 	var key uintptr
 	a.pinner.Pin(&key)
@@ -794,7 +822,10 @@ func (c *Ctx) GenerateKeyPair(sh SessionHandle, m []*Mechanism, public, private 
 	var a arena
 	defer a.free()
 
-	mechPtr := a.marshalMechanism(m)
+	mechPtr, err := a.marshalMechanism(m)
+	if err != nil {
+		return 0, 0, err
+	}
 	pubPtr, pubLen := a.marshalAttributes(public)
 	privPtr, privLen := a.marshalAttributes(private)
 
@@ -814,7 +845,10 @@ func (c *Ctx) WrapKey(sh SessionHandle, m []*Mechanism, wrappingkey, key ObjectH
 	var a arena
 	defer a.free()
 
-	mechPtr := a.marshalMechanism(m)
+	mechPtr, err := a.marshalMechanism(m)
+	if err != nil {
+		return nil, err
+	}
 
 	// First pass: get size.
 	var length uintptr
@@ -839,7 +873,10 @@ func (c *Ctx) UnwrapKey(sh SessionHandle, m []*Mechanism, unwrappingkey ObjectHa
 	var a arena
 	defer a.free()
 
-	mechPtr := a.marshalMechanism(m)
+	mechPtr, err := a.marshalMechanism(m)
+	if err != nil {
+		return 0, err
+	}
 	attrPtr, attrLen := a.marshalAttributes(a2)
 
 	var pWrap uintptr
@@ -863,7 +900,10 @@ func (c *Ctx) DeriveKey(sh SessionHandle, m []*Mechanism, basekey ObjectHandle, 
 	var a arena
 	defer a.free()
 
-	mechPtr := a.marshalMechanism(m)
+	mechPtr, err := a.marshalMechanism(m)
+	if err != nil {
+		return 0, err
+	}
 	attrPtr, attrLen := a.marshalAttributes(a2)
 
 	var key uintptr

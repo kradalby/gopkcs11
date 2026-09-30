@@ -3,66 +3,116 @@
 package pkcs11
 
 import (
+	"bytes"
 	"encoding/binary"
+	"runtime"
+	"sync"
+	"syscall"
 	"unsafe"
 )
 
 // GCMParams holds parameters for CKM_AES_GCM.
-// The caller must call Free() after the encrypt/decrypt operation to release
-// resources. Do NOT free before reading the IV (which may be written back by
-// the HSM during encryption).
+// Some modules write a generated IV back, possibly not until the operation
+// ends; IV returns it. Each operation's parameters live outside the Go heap
+// until Free: call it once no operation using g is active and its IV is
+// read, or that memory leaks.
 type GCMParams struct {
 	iv      []byte
 	aad     []byte
 	tagSize int
-	// params is the C-layout struct for CK_GCM_PARAMS:
-	//   pIv          unsafe.Pointer (8 bytes)
-	//   ulIvLen      CK_ULONG (8 bytes)
-	//   ulIvBits     CK_ULONG (8 bytes)
-	//   pAAD         unsafe.Pointer (8 bytes)
-	//   ulAADLen     CK_ULONG (8 bytes)
-	//   ulTagBits    CK_ULONG (8 bytes)
-	params [48]byte
+
+	mu sync.Mutex
+	// ops holds each operation's memory, newest last, so operations never
+	// share what the module writes. The module may keep pointers into it
+	// until the operation ends, which only the caller knows. Pinning Go
+	// memory that long would crash the process if g were dropped without
+	// Free, so it is mmap'd instead.
+	ops []gcmOp
 }
+
+type gcmOp struct {
+	// mem is the whole mapping: CK_GCM_PARAMS, then IV, then AAD.
+	mem, iv []byte
+}
+
+// Swapped by tests to watch operation memory come and go.
+var mmap, munmap = syscall.Mmap, syscall.Munmap
 
 // NewGCMParams creates GCM parameters.
 func NewGCMParams(iv, aad []byte, tagSize int) *GCMParams {
-	g := &GCMParams{
-		iv:      iv,
+	return &GCMParams{
+		iv:      bytes.Clone(iv),
 		aad:     aad,
 		tagSize: tagSize,
 	}
-	return g
 }
 
-// IV returns the IV, possibly updated by the HSM after encryption.
+// IV returns a copy of the newest operation's IV, as the module left it.
+// With operations sharing g concurrently, newest is arbitrary: give each
+// operation its own GCMParams to read back its IV.
 func (g *GCMParams) IV() []byte {
-	return g.iv
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.ops) == 0 {
+		return bytes.Clone(g.iv)
+	}
+	return bytes.Clone(g.ops[len(g.ops)-1].iv)
 }
 
-// Free releases resources held by GCMParams.
+// Free releases per-operation memory. No operation using g may be active.
 func (g *GCMParams) Free() {
-	// No C allocations to free in the purego implementation.
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, op := range g.ops {
+		// Only fails for memory not from mmap.
+		_ = munmap(op.mem)
+	}
+	g.ops = nil
 }
 
-func (g *GCMParams) marshal() []byte {
-	ptrSize := unsafe.Sizeof(uintptr(0))
-	if ptrSize != 8 {
+// marshal builds one operation's CK_GCM_PARAMS, IV and AAD in memory that
+// stays valid until Free, not just for the call.
+func (g *GCMParams) marshal() ([]byte, error) {
+	const paramsLen = 48
+	if unsafe.Sizeof(uintptr(0)) != 8 {
 		panic("pkcs11: GCMParams only supports 64-bit platforms")
 	}
-	var b [48]byte
-	if len(g.iv) > 0 {
-		binary.LittleEndian.PutUint64(b[0:8], uint64(uintptr(unsafe.Pointer(&g.iv[0]))))
+	mem, err := mmap(-1, 0, paramsLen+len(g.iv)+len(g.aad),
+		syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS)
+	if err != nil {
+		return nil, Error(CKR_HOST_MEMORY)
 	}
-	binary.LittleEndian.PutUint64(b[8:16], uint64(len(g.iv)))
-	binary.LittleEndian.PutUint64(b[16:24], uint64(len(g.iv)*8))
-	if len(g.aad) > 0 {
-		binary.LittleEndian.PutUint64(b[24:32], uint64(uintptr(unsafe.Pointer(&g.aad[0]))))
-	}
-	binary.LittleEndian.PutUint64(b[32:40], uint64(len(g.aad)))
+	b := mem[:paramsLen]
+	iv := mem[paramsLen : paramsLen+len(g.iv)]
+	aad := mem[paramsLen+len(g.iv):]
+	copy(iv, g.iv)
+	copy(aad, g.aad)
+	// CK_GCM_PARAMS layout:
+	//   pIv          CK_BYTE_PTR (8 bytes)
+	//   ulIvLen      CK_ULONG (8 bytes)
+	//   ulIvBits     CK_ULONG (8 bytes)
+	//   pAAD         CK_BYTE_PTR (8 bytes)
+	//   ulAADLen     CK_ULONG (8 bytes)
+	//   ulTagBits    CK_ULONG (8 bytes)
+	binary.LittleEndian.PutUint64(b[0:8], uint64(addr(iv)))
+	binary.LittleEndian.PutUint64(b[8:16], uint64(len(iv)))
+	binary.LittleEndian.PutUint64(b[16:24], uint64(len(iv)*8))
+	binary.LittleEndian.PutUint64(b[24:32], uint64(addr(aad)))
+	binary.LittleEndian.PutUint64(b[32:40], uint64(len(aad)))
 	binary.LittleEndian.PutUint64(b[40:48], uint64(g.tagSize))
-	copy(g.params[:], b[:])
-	return g.params[:]
+
+	g.mu.Lock()
+	g.ops = append(g.ops, gcmOp{mem: mem, iv: iv})
+	g.mu.Unlock()
+	return b, nil
+}
+
+// addr returns the address of non-Go memory b, or 0 (NULL) when b is empty.
+func addr(b []byte) uintptr {
+	if len(b) == 0 {
+		return 0
+	}
+	return uintptr(unsafe.Pointer(&b[0]))
 }
 
 // OAEPParams holds parameters for CKM_RSA_PKCS_OAEP.
@@ -83,7 +133,7 @@ func NewOAEPParams(hashAlg, mgf, sourceType uint, sourceData []byte) *OAEPParams
 	}
 }
 
-func (o *OAEPParams) marshal() []byte {
+func (o *OAEPParams) marshal(p *runtime.Pinner) []byte {
 	// CK_RSA_PKCS_OAEP_PARAMS layout:
 	//   hashAlg      CK_MECHANISM_TYPE (8 bytes)
 	//   mgf          CK_RSA_PKCS_MGF_TYPE (8 bytes)
@@ -94,9 +144,7 @@ func (o *OAEPParams) marshal() []byte {
 	binary.LittleEndian.PutUint64(b[0:8], uint64(o.HashAlg))
 	binary.LittleEndian.PutUint64(b[8:16], uint64(o.MGF))
 	binary.LittleEndian.PutUint64(b[16:24], uint64(o.SourceType))
-	if len(o.SourceData) > 0 {
-		binary.LittleEndian.PutUint64(b[24:32], uint64(uintptr(unsafe.Pointer(&o.SourceData[0]))))
-	}
+	binary.LittleEndian.PutUint64(b[24:32], uint64(pinBytes(p, o.SourceData)))
 	binary.LittleEndian.PutUint64(b[32:40], uint64(len(o.SourceData)))
 	return b
 }
@@ -117,7 +165,7 @@ func NewECDH1DeriveParams(kdf uint, sharedData, publicKeyData []byte) *ECDH1Deri
 	}
 }
 
-func (e *ECDH1DeriveParams) marshal() []byte {
+func (e *ECDH1DeriveParams) marshal(p *runtime.Pinner) []byte {
 	// CK_ECDH1_DERIVE_PARAMS layout:
 	//   kdf                CK_EC_KDF_TYPE (8 bytes)
 	//   ulSharedDataLen    CK_ULONG (8 bytes)
@@ -127,13 +175,9 @@ func (e *ECDH1DeriveParams) marshal() []byte {
 	b := make([]byte, 40)
 	binary.LittleEndian.PutUint64(b[0:8], uint64(e.KDF))
 	binary.LittleEndian.PutUint64(b[8:16], uint64(len(e.SharedData)))
-	if len(e.SharedData) > 0 {
-		binary.LittleEndian.PutUint64(b[16:24], uint64(uintptr(unsafe.Pointer(&e.SharedData[0]))))
-	}
+	binary.LittleEndian.PutUint64(b[16:24], uint64(pinBytes(p, e.SharedData)))
 	binary.LittleEndian.PutUint64(b[24:32], uint64(len(e.PublicKeyData)))
-	if len(e.PublicKeyData) > 0 {
-		binary.LittleEndian.PutUint64(b[32:40], uint64(uintptr(unsafe.Pointer(&e.PublicKeyData[0]))))
-	}
+	binary.LittleEndian.PutUint64(b[32:40], uint64(pinBytes(p, e.PublicKeyData)))
 	return b
 }
 
