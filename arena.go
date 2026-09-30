@@ -34,8 +34,17 @@ func (a *arena) free() {
 	a.pinner.Unpin()
 }
 
-// pinNonNull pins s and returns its address for a C call. Empty slices get a
-// placeholder: some modules reject NULL even with a zero length.
+// pinBytes pins b and returns its address, or 0 (NULL) when b is empty.
+func pinBytes(p *runtime.Pinner, b []byte) uintptr {
+	if len(b) == 0 {
+		return 0
+	}
+	p.Pin(&b[0])
+	return uintptr(unsafe.Pointer(&b[0]))
+}
+
+// pinNonNull is pinBytes for buffers that must not be NULL: some modules
+// reject NULL even with a zero length, so empty slices get a placeholder.
 func pinNonNull[T any](p *runtime.Pinner, s []T) uintptr {
 	if len(s) == 0 {
 		s = make([]T, 1)
@@ -157,37 +166,31 @@ func querySizes(buf []byte, count int) []uintptr {
 // marshalMechanism converts a Go []*Mechanism into a C-compatible
 // CK_MECHANISM struct pointer. PKCS#11 functions take a single mechanism,
 // but the API uses []*Mechanism for compatibility with miekg/pkcs11.
-func (a *arena) marshalMechanism(mechs []*Mechanism) uintptr {
+func (a *arena) marshalMechanism(mechs []*Mechanism) (uintptr, error) {
 	if len(mechs) == 0 {
-		return 0
+		return 0, nil
 	}
 	m := mechs[0]
 
-	// Resolve parameter bytes from generator if needed.
-	var paramBytes []byte
+	paramBytes := m.Parameter
 	switch g := m.generator.(type) {
 	case *GCMParams:
-		paramBytes = g.marshal()
-		a.pinner.Pin(&paramBytes[0])
-	case *OAEPParams:
-		paramBytes = g.marshal()
-		a.pinner.Pin(&paramBytes[0])
-	case *ECDH1DeriveParams:
-		paramBytes = g.marshal()
-		a.pinner.Pin(&paramBytes[0])
-	default:
-		paramBytes = m.Parameter
+		// The module may use these past this call, so they are not Go memory.
+		var err error
+		if paramBytes, err = g.marshal(); err != nil {
+			return 0, err
+		}
+	case interface{ marshal(*runtime.Pinner) []byte }:
+		// Pins the Go slices the struct points at, for this call only.
+		paramBytes = g.marshal(&a.pinner)
 	}
 
 	buf := make([]byte, int(ckMechanismSize))
 	a.pinner.Pin(&buf[0])
 
 	*(*uintptr)(unsafe.Pointer(&buf[0])) = uintptr(m.Mechanism)
-	if len(paramBytes) > 0 {
-		a.pinner.Pin(&paramBytes[0])
-		*(*uintptr)(unsafe.Pointer(&buf[int(ckULONGSize)])) = uintptr(unsafe.Pointer(&paramBytes[0]))
-	}
+	*(*uintptr)(unsafe.Pointer(&buf[int(ckULONGSize)])) = pinBytes(&a.pinner, paramBytes)
 	*(*uintptr)(unsafe.Pointer(&buf[2*int(ckULONGSize)])) = uintptr(len(paramBytes))
 
-	return uintptr(unsafe.Pointer(&buf[0]))
+	return uintptr(unsafe.Pointer(&buf[0])), nil
 }

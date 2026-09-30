@@ -4,7 +4,13 @@ package pkcs11
 
 import (
 	"bytes"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
+	"unsafe"
+
+	"github.com/ebitengine/purego"
 )
 
 // TestDigestConsistency verifies SHA-1 produces the correct well-known hash.
@@ -302,5 +308,165 @@ func TestMultiPartEmptyOutput(t *testing.T) {
 	}
 	if err := p.DecryptInit(session, gcm(), key); err != nil {
 		t.Fatalf("DecryptInit after empty Decrypt: %v", err)
+	}
+}
+
+// TestGCMParamsSharedMechanism uses one *Mechanism from two goroutines;
+// marshalling its parameters must not write to shared state.
+func TestGCMParamsSharedMechanism(t *testing.T) {
+	p := setenv(t)
+	slotID := initToken(t, p)
+	s1 := getSession(t, p, slotID)
+	defer finishSession(t, p, s1)
+	s2, err := p.OpenSession(slotID, CKF_SERIAL_SESSION|CKF_RW_SESSION)
+	if err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	defer p.CloseSession(s2)
+	key := generateAESKey(t, p, s1)
+
+	gcm := []*Mechanism{NewMechanism(CKM_AES_GCM, NewGCMParams(make([]byte, 12), []byte("aad"), 128))}
+	var wg sync.WaitGroup
+	for _, s := range []SessionHandle{s1, s2} {
+		wg.Go(func() {
+			for range 50 {
+				if err := p.EncryptInit(s, gcm, key); err != nil {
+					t.Errorf("EncryptInit: %v", err)
+					return
+				}
+				if _, err := p.Encrypt(s, []byte("hello")); err != nil {
+					t.Errorf("Encrypt: %v", err)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+}
+
+func TestGCMParamsOwnsIV(t *testing.T) {
+	iv := []byte{1, 2, 3}
+	g := NewGCMParams(iv, nil, 128)
+	iv[0] = 9
+	if got := g.IV(); got[0] != 1 {
+		t.Errorf("IV follows caller's slice: %v", got)
+	}
+	g.IV()[1] = 9
+	if got := g.IV(); got[1] != 2 {
+		t.Errorf("IV() exposes internal buffer: %v", got)
+	}
+}
+
+// cPtr reads an address the way the module sees it.
+func cPtr(addr uintptr) unsafe.Pointer {
+	return *(*unsafe.Pointer)(unsafe.Pointer(&addr))
+}
+
+// gcmIV returns the pIv buffer of the CK_GCM_PARAMS behind a CK_MECHANISM.
+func gcmIV(mech uintptr) []byte {
+	params := cPtr(*(*uintptr)(unsafe.Add(cPtr(mech), ckULONGSize)))
+	iv := *(*uintptr)(params)
+	ivLen := *(*uintptr)(unsafe.Add(params, ckULONGSize))
+	return unsafe.Slice((*byte)(cPtr(iv)), ivLen)
+}
+
+// Modules that generate the IV write it into pIv; operations sharing a
+// mechanism must not see each other's.
+func TestGCMParamsModuleWritesIV(t *testing.T) {
+	c := &Ctx{fl: &functionList{
+		C_EncryptInit: purego.NewCallback(func(sh, mech, _ uintptr) uintptr {
+			iv := gcmIV(mech)
+			for i := range iv {
+				iv[i] = byte(sh)
+			}
+			time.Sleep(time.Microsecond)
+			for _, b := range iv {
+				if b != byte(sh) {
+					return CKR_GENERAL_ERROR
+				}
+			}
+			return CKR_OK
+		}),
+	}}
+
+	g := NewGCMParams(make([]byte, 12), nil, 128)
+	defer g.Free()
+	gcm := []*Mechanism{NewMechanism(CKM_AES_GCM, g)}
+	var wg sync.WaitGroup
+	for s := range SessionHandle(4) {
+		wg.Go(func() {
+			for range 100 {
+				if err := c.EncryptInit(s+1, gcm, 0); err != nil {
+					t.Errorf("EncryptInit: %v", err)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+
+	iv := g.IV()
+	if want := bytes.Repeat(iv[:1], len(iv)); iv[0] == 0 || !bytes.Equal(iv, want) {
+		t.Errorf("IV() = %x, want one operation's generated IV", iv)
+	}
+}
+
+// Some modules keep pIv from EncryptInit and write the IV during Encrypt, so
+// it must be memory Go never moves or frees, live until Free and not after.
+func TestGCMParamsIVWrittenDuringEncrypt(t *testing.T) {
+	live := map[*byte][]byte{}
+	mmap = func(fd int, off int64, n, prot, flags int) ([]byte, error) {
+		b, err := syscall.Mmap(fd, off, n, prot, flags)
+		if err == nil {
+			live[&b[0]] = b
+		}
+		return b, err
+	}
+	munmap = func(b []byte) error {
+		delete(live, &b[0])
+		return syscall.Munmap(b)
+	}
+	t.Cleanup(func() { mmap, munmap = syscall.Mmap, syscall.Munmap })
+	isLive := func(b []byte) bool {
+		p := uintptr(unsafe.Pointer(&b[0]))
+		for _, m := range live {
+			if base := uintptr(unsafe.Pointer(&m[0])); p >= base && p+uintptr(len(b)) <= base+uintptr(len(m)) {
+				return true
+			}
+		}
+		return false
+	}
+
+	generated := bytes.Repeat([]byte{7}, 12)
+	var pIv []byte
+	c := &Ctx{fl: &functionList{
+		C_EncryptInit: purego.NewCallback(func(_, mech, _ uintptr) uintptr {
+			pIv = gcmIV(mech)
+			return CKR_OK
+		}),
+		C_Encrypt: purego.NewCallback(func(_, _, _, _, outLen uintptr) uintptr {
+			if !isLive(pIv) {
+				t.Error("pIv not in live operation memory after EncryptInit")
+				return CKR_GENERAL_ERROR
+			}
+			copy(pIv, generated)
+			*(*uintptr)(cPtr(outLen)) = 0
+			return CKR_OK
+		}),
+	}}
+
+	g := NewGCMParams(make([]byte, 12), nil, 128)
+	if err := c.EncryptInit(1, []*Mechanism{NewMechanism(CKM_AES_GCM, g)}, 0); err != nil {
+		t.Fatalf("EncryptInit: %v", err)
+	}
+	if _, err := c.Encrypt(1, nil); err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if got := g.IV(); !bytes.Equal(got, generated) {
+		t.Errorf("IV() = %x, want %x", got, generated)
+	}
+	g.Free()
+	if len(live) != 0 {
+		t.Errorf("%d operation mappings live after Free", len(live))
 	}
 }
