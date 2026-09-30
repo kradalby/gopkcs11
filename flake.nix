@@ -78,6 +78,9 @@
             gotest = fc.goTest (
               common
               // {
+                # -race also turns on checkptr, which catches invalid
+                # unsafe.Pointer use in the FFI layer.
+                goRace = true;
                 nativeCheckInputs = [ pkgs.softhsm ];
                 testEnv = ''
                   export SOFTHSM_LIB=${softhsm2-lib}
