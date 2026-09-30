@@ -565,12 +565,12 @@ func (c *Ctx) Encrypt(sh SessionHandle, message []byte) ([]byte, error) {
 
 // EncryptUpdate calls C_EncryptUpdate.
 func (c *Ctx) EncryptUpdate(sh SessionHandle, plain []byte) ([]byte, error) {
-	return c.updateOutput(c.fl.C_EncryptUpdate, uintptr(sh), plain)
+	return c.twoPassOutput(c.fl.C_EncryptUpdate, uintptr(sh), plain)
 }
 
 // EncryptFinal calls C_EncryptFinal.
 func (c *Ctx) EncryptFinal(sh SessionHandle) ([]byte, error) {
-	return c.finalOutput(c.fl.C_EncryptFinal, uintptr(sh))
+	return c.twoPassOutputNoInput(c.fl.C_EncryptFinal, uintptr(sh))
 }
 
 // DecryptInit calls C_DecryptInit.
@@ -589,12 +589,12 @@ func (c *Ctx) Decrypt(sh SessionHandle, cipher []byte) ([]byte, error) {
 
 // DecryptUpdate calls C_DecryptUpdate.
 func (c *Ctx) DecryptUpdate(sh SessionHandle, cipher []byte) ([]byte, error) {
-	return c.updateOutput(c.fl.C_DecryptUpdate, uintptr(sh), cipher)
+	return c.twoPassOutput(c.fl.C_DecryptUpdate, uintptr(sh), cipher)
 }
 
 // DecryptFinal calls C_DecryptFinal.
 func (c *Ctx) DecryptFinal(sh SessionHandle) ([]byte, error) {
-	return c.finalOutput(c.fl.C_DecryptFinal, uintptr(sh))
+	return c.twoPassOutputNoInput(c.fl.C_DecryptFinal, uintptr(sh))
 }
 
 // DigestInit calls C_DigestInit.
@@ -922,26 +922,17 @@ func (c *Ctx) WaitForSlotEvent(flags uint) chan SlotEvent {
 	return ch
 }
 
-// twoPassOutput handles the common PKCS#11 two-pass pattern for functions that
-// take input data and produce output data. First call with NULL output to get
-// size, then call again with allocated buffer.
+// twoPassOutput implements the PKCS#11 output convention for functions that
+// take input: a NULL output buffer asks for the size, then a second call fills
+// a buffer of that size. The second call is made even when the size is zero,
+// since only it consumes the input and, for single-part calls, ends the
+// operation.
 func (c *Ctx) twoPassOutput(fn, sh uintptr, input []byte) ([]byte, error) {
 	var pinner runtime.Pinner
 	defer pinner.Unpin()
 
-	// Some PKCS#11 implementations reject NULL pointers even with length 0.
-	// Use a dummy byte to guarantee a valid pointer for empty input.
-	var dummy [1]byte
-	var pInput uintptr
-	if len(input) > 0 {
-		pinner.Pin(&input[0])
-		pInput = uintptr(unsafe.Pointer(&input[0]))
-	} else {
-		pinner.Pin(&dummy[0])
-		pInput = uintptr(unsafe.Pointer(&dummy[0]))
-	}
+	pInput := pinNonNull(&pinner, input)
 
-	// First pass: get output size.
 	var outLen uintptr
 	pinner.Pin(&outLen)
 	rv, _, _ := purego.SyscallN(fn, sh, pInput, uintptr(len(input)), 0, uintptr(unsafe.Pointer(&outLen)))
@@ -949,26 +940,22 @@ func (c *Ctx) twoPassOutput(fn, sh uintptr, input []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	// Second pass: read output.
-	if outLen == 0 {
-		return nil, nil
-	}
 	out := make([]byte, outLen)
-	pinner.Pin(&out[0])
-	rv, _, _ = purego.SyscallN(fn, sh, pInput, uintptr(len(input)), uintptr(unsafe.Pointer(&out[0])), uintptr(unsafe.Pointer(&outLen)))
+	pOut := pinNonNull(&pinner, out)
+	rv, _, _ = purego.SyscallN(fn, sh, pInput, uintptr(len(input)), pOut, uintptr(unsafe.Pointer(&outLen)))
 	if err := toError(rv); err != nil {
 		return nil, err
 	}
 	return out[:outLen], nil
 }
 
-// twoPassOutputNoInput handles the two-pass pattern for functions that produce
-// output without input data (e.g., EncryptFinal, DigestFinal).
+// twoPassOutputNoInput is twoPassOutput for functions without input, such as
+// the Final calls. The second call is what ends the operation, so it is made
+// even when there is nothing to return.
 func (c *Ctx) twoPassOutputNoInput(fn, sh uintptr) ([]byte, error) {
 	var pinner runtime.Pinner
 	defer pinner.Unpin()
 
-	// First pass: get output size.
 	var outLen uintptr
 	pinner.Pin(&outLen)
 	rv, _, _ := purego.SyscallN(fn, sh, 0, uintptr(unsafe.Pointer(&outLen)))
@@ -976,64 +963,9 @@ func (c *Ctx) twoPassOutputNoInput(fn, sh uintptr) ([]byte, error) {
 		return nil, err
 	}
 
-	// Second pass: read output.
-	if outLen == 0 {
-		return nil, nil
-	}
 	out := make([]byte, outLen)
-	pinner.Pin(&out[0])
-	rv, _, _ = purego.SyscallN(fn, sh, uintptr(unsafe.Pointer(&out[0])), uintptr(unsafe.Pointer(&outLen)))
-	if err := toError(rv); err != nil {
-		return nil, err
-	}
-	return out[:outLen], nil
-}
-
-// updateOutput handles multi-part Update functions (EncryptUpdate, DecryptUpdate).
-// These are NOT two-pass: the output is produced incrementally and may be empty
-// if the implementation is buffering. We allocate an output buffer equal to the
-// input size plus one block (to handle padding), make a single call, and return
-// whatever was written.
-func (c *Ctx) updateOutput(fn, sh uintptr, input []byte) ([]byte, error) {
-	var pinner runtime.Pinner
-	defer pinner.Unpin()
-
-	var pInput uintptr
-	if len(input) > 0 {
-		pinner.Pin(&input[0])
-		pInput = uintptr(unsafe.Pointer(&input[0]))
-	}
-
-	// Allocate output buffer. For block ciphers, output can be up to
-	// input_len + block_size. Use input_len + 32 as a generous upper bound.
-	outBufLen := len(input) + 32
-	out := make([]byte, outBufLen)
-	pinner.Pin(&out[0])
-
-	outLen := uintptr(outBufLen)
-	pinner.Pin(&outLen)
-
-	rv, _, _ := purego.SyscallN(fn, sh, pInput, uintptr(len(input)), uintptr(unsafe.Pointer(&out[0])), uintptr(unsafe.Pointer(&outLen)))
-	if err := toError(rv); err != nil {
-		return nil, err
-	}
-	return out[:outLen], nil
-}
-
-// finalOutput handles multi-part Final functions (EncryptFinal, DecryptFinal).
-// Similar to updateOutput but with no input data.
-func (c *Ctx) finalOutput(fn, sh uintptr) ([]byte, error) {
-	var pinner runtime.Pinner
-	defer pinner.Unpin()
-
-	// For Final, the output is at most one block. 256 bytes is generous.
-	out := make([]byte, 256)
-	pinner.Pin(&out[0])
-
-	outLen := uintptr(256)
-	pinner.Pin(&outLen)
-
-	rv, _, _ := purego.SyscallN(fn, sh, uintptr(unsafe.Pointer(&out[0])), uintptr(unsafe.Pointer(&outLen)))
+	pOut := pinNonNull(&pinner, out)
+	rv, _, _ = purego.SyscallN(fn, sh, pOut, uintptr(unsafe.Pointer(&outLen)))
 	if err := toError(rv); err != nil {
 		return nil, err
 	}
