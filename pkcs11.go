@@ -382,9 +382,9 @@ func (c *Ctx) GetOperationState(sh SessionHandle) ([]byte, error) {
 	}
 
 	state := make([]byte, length)
-	pinner.Pin(&state[0])
+	pState := pinNonNull(&pinner, state)
 	pinner.Pin(&length)
-	rv, _, _ = purego.SyscallN(c.fl.C_GetOperationState, uintptr(sh), uintptr(unsafe.Pointer(&state[0])), uintptr(unsafe.Pointer(&length)))
+	rv, _, _ = purego.SyscallN(c.fl.C_GetOperationState, uintptr(sh), pState, uintptr(unsafe.Pointer(&length)))
 	pinner.Unpin()
 	if err := toError(rv); err != nil {
 		return nil, err
@@ -531,11 +531,11 @@ func (c *Ctx) FindObjects(sh SessionHandle, maxObjects int) ([]ObjectHandle, boo
 	objs := make([]uintptr, maxObjects)
 	var count uintptr
 	var pinner runtime.Pinner
-	pinner.Pin(&objs[0])
+	pObjs := pinNonNull(&pinner, objs)
 	pinner.Pin(&count)
 	defer pinner.Unpin()
 
-	rv, _, _ := purego.SyscallN(c.fl.C_FindObjects, uintptr(sh), uintptr(unsafe.Pointer(&objs[0])), uintptr(maxObjects), uintptr(unsafe.Pointer(&count)))
+	rv, _, _ := purego.SyscallN(c.fl.C_FindObjects, uintptr(sh), pObjs, uintptr(maxObjects), uintptr(unsafe.Pointer(&count)))
 	if err := toError(rv); err != nil {
 		return nil, false, err
 	}
@@ -860,8 +860,8 @@ func (c *Ctx) WrapKey(sh SessionHandle, m []*Mechanism, wrappingkey, key ObjectH
 
 	// Second pass: get data.
 	out := make([]byte, length)
-	a.pinner.Pin(&out[0])
-	rv, _, _ = purego.SyscallN(c.fl.C_WrapKey, uintptr(sh), mechPtr, uintptr(wrappingkey), uintptr(key), uintptr(unsafe.Pointer(&out[0])), uintptr(unsafe.Pointer(&length)))
+	pOut := pinNonNull(&a.pinner, out)
+	rv, _, _ = purego.SyscallN(c.fl.C_WrapKey, uintptr(sh), mechPtr, uintptr(wrappingkey), uintptr(key), pOut, uintptr(unsafe.Pointer(&length)))
 	if err := toError(rv); err != nil {
 		return nil, err
 	}
@@ -934,10 +934,10 @@ func (c *Ctx) SeedRandom(sh SessionHandle, seed []byte) error {
 func (c *Ctx) GenerateRandom(sh SessionHandle, length int) ([]byte, error) {
 	buf := make([]byte, length)
 	var pinner runtime.Pinner
-	pinner.Pin(&buf[0])
+	pBuf := pinNonNull(&pinner, buf)
 	defer pinner.Unpin()
 
-	rv, _, _ := purego.SyscallN(c.fl.C_GenerateRandom, uintptr(sh), uintptr(unsafe.Pointer(&buf[0])), uintptr(length))
+	rv, _, _ := purego.SyscallN(c.fl.C_GenerateRandom, uintptr(sh), pBuf, uintptr(length))
 	if err := toError(rv); err != nil {
 		return nil, err
 	}

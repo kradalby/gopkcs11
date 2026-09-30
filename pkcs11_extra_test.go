@@ -470,3 +470,32 @@ func TestGCMParamsIVWrittenDuringEncrypt(t *testing.T) {
 		t.Errorf("%d operation mappings live after Free", len(live))
 	}
 }
+
+func TestZeroLength(t *testing.T) {
+	p := setenv(t)
+	slotID := initToken(t, p)
+	session := getSession(t, p, slotID)
+	defer finishSession(t, p, session)
+
+	if err := p.FindObjectsInit(session, nil); err != nil {
+		t.Fatalf("FindObjectsInit: %v", err)
+	}
+	objs, _, err := p.FindObjects(session, 0)
+	if err != nil {
+		t.Errorf("FindObjects(0): %v", err)
+	}
+	if len(objs) != 0 {
+		t.Errorf("FindObjects(0) = %d objects, want 0", len(objs))
+	}
+	if err := p.FindObjectsFinal(session); err != nil {
+		t.Fatalf("FindObjectsFinal: %v", err)
+	}
+
+	random, err := p.GenerateRandom(session, 0)
+	if err != nil {
+		t.Errorf("GenerateRandom(0): %v", err)
+	}
+	if len(random) != 0 {
+		t.Errorf("GenerateRandom(0) = %d bytes, want 0", len(random))
+	}
+}
