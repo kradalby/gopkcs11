@@ -214,7 +214,9 @@ func TestMultiPartGCMDecrypt(t *testing.T) {
 	plain := bytes.Repeat([]byte("A"), 1000)
 	iv := make([]byte, 12)
 	gcm := func() []*Mechanism {
-		return []*Mechanism{NewMechanism(CKM_AES_GCM, NewGCMParams(iv, nil, 128))}
+		g := NewGCMParams(iv, nil, 128)
+		t.Cleanup(g.Free)
+		return []*Mechanism{NewMechanism(CKM_AES_GCM, g)}
 	}
 
 	if err := p.EncryptInit(session, gcm(), key); err != nil {
@@ -287,7 +289,9 @@ func TestMultiPartEmptyOutput(t *testing.T) {
 	// Empty plaintext: Decrypt produces nothing but must still finish.
 	iv := make([]byte, 12)
 	gcm := func() []*Mechanism {
-		return []*Mechanism{NewMechanism(CKM_AES_GCM, NewGCMParams(iv, nil, 128))}
+		g := NewGCMParams(iv, nil, 128)
+		t.Cleanup(g.Free)
+		return []*Mechanism{NewMechanism(CKM_AES_GCM, g)}
 	}
 	if err := p.EncryptInit(session, gcm(), key); err != nil {
 		t.Fatalf("EncryptInit GCM: %v", err)
@@ -325,7 +329,9 @@ func TestGCMParamsSharedMechanism(t *testing.T) {
 	defer p.CloseSession(s2)
 	key := generateAESKey(t, p, s1)
 
-	gcm := []*Mechanism{NewMechanism(CKM_AES_GCM, NewGCMParams(make([]byte, 12), []byte("aad"), 128))}
+	g := NewGCMParams(make([]byte, 12), []byte("aad"), 128)
+	t.Cleanup(g.Free)
+	gcm := []*Mechanism{NewMechanism(CKM_AES_GCM, g)}
 	var wg sync.WaitGroup
 	for _, s := range []SessionHandle{s1, s2} {
 		wg.Go(func() {

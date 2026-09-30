@@ -25,6 +25,19 @@ p.Login(session, pkcs11.CKU_USER, "1234")
 // Same API as miekg/pkcs11.
 ```
 
+### AES-GCM
+
+Each operation's `GCMParams` live in native memory until `Free`. Call it once
+the operation ends and any IV is read:
+
+```go
+params := pkcs11.NewGCMParams(iv, aad, 128)
+defer params.Free()
+mech := []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_AES_GCM, params)}
+```
+
+`Free` was a no-op in earlier gopkcs11 versions; code that skipped it now leaks.
+
 ### crypto.Signer
 
 ```go
