@@ -114,22 +114,20 @@ func (a *arena) marshalAttributesWithBuffers(attrs []*Attribute, sizes []uintptr
 	return uintptr(unsafe.Pointer(&buf[0])), uintptr(len(attrs)), buf, values
 }
 
-// unmarshalAttributes reads back the CK_ATTRIBUTE array and extracts the
-// values into Go Attribute structs.
-func unmarshalAttributes(buf []byte, count int) []*Attribute {
-	result := make([]*Attribute, count)
-	for i := range count {
+// unmarshalAttributes reads back the CK_ATTRIBUTE array filled by the second
+// C_GetAttributeValue pass. Values come from the Go buffers the array points
+// at, never from pValue: turning a uintptr back into a Go pointer is invalid
+// and checkptr aborts on it.
+func unmarshalAttributes(buf []byte, values [][]byte) []*Attribute {
+	result := make([]*Attribute, len(values))
+	for i, v := range values {
 		off := i * int(ckAttributeSize)
 		typ := *(*uintptr)(unsafe.Pointer(&buf[off]))
-		pValue := *(*uintptr)(unsafe.Pointer(&buf[off+int(ckULONGSize)]))
 		valueLen := *(*uintptr)(unsafe.Pointer(&buf[off+2*int(ckULONGSize)]))
 
 		attr := &Attribute{Type: uint(typ)}
-		if pValue != 0 && valueLen > 0 && valueLen != ^uintptr(0) {
-			// Copy the data out of the pinned buffer.
-			src := unsafe.Slice((*byte)(unsafe.Pointer(pValue)), valueLen)
-			attr.Value = make([]byte, valueLen)
-			copy(attr.Value, src)
+		if valueLen > 0 && valueLen <= uintptr(len(v)) {
+			attr.Value = v[:valueLen]
 		}
 		result[i] = attr
 	}

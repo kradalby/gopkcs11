@@ -118,13 +118,15 @@ func loadModule(module string) (*functionList, error) {
 
 	// Call C_GetFunctionList(CK_FUNCTION_LIST_PTR_PTR ppFunctionList)
 	// It returns CK_RV and writes a pointer to CK_FUNCTION_LIST into ppFunctionList.
-	var flPtr uintptr
+	// unsafe.Pointer, not uintptr, so readFunctionList can use unsafe.Add;
+	// converting uintptr arithmetic back to a pointer is invalid.
+	var flPtr unsafe.Pointer
 	rv, _, _ := purego.SyscallN(sym, uintptr(unsafe.Pointer(&flPtr)))
 	if err := toError(rv); err != nil {
 		purego.Dlclose(handle) //nolint:errcheck,gosec // cleanup on error path; nothing to do if close fails (G104)
 		return nil, fmt.Errorf("pkcs11: C_GetFunctionList: %w", err)
 	}
-	if flPtr == 0 {
+	if flPtr == nil {
 		purego.Dlclose(handle) //nolint:errcheck,gosec // cleanup on error path; nothing to do if close fails (G104)
 		return nil, fmt.Errorf("pkcs11: C_GetFunctionList returned nil")
 	}
@@ -145,10 +147,10 @@ func loadModule(module string) (*functionList, error) {
 //	offset 8: C_Initialize (8 bytes)
 //	offset 16: C_Finalize (8 bytes)
 //	... 68 function pointers total, each 8 bytes ...
-func readFunctionList(ptr uintptr, fl *functionList) {
+func readFunctionList(ptr unsafe.Pointer, fl *functionList) {
 	// Each function pointer is at offset 8 + (index * 8).
 	readPtr := func(offset uintptr) uintptr {
-		return *(*uintptr)(unsafe.Pointer(ptr + offset))
+		return *(*uintptr)(unsafe.Add(ptr, offset))
 	}
 
 	fl.C_Initialize = readPtr(8)

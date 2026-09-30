@@ -493,13 +493,13 @@ func (c *Ctx) GetAttributeValue(sh SessionHandle, o ObjectHandle, a []*Attribute
 	// Second pass: allocate buffers and read values.
 	var ar2 arena
 	defer ar2.free()
-	attrPtr, attrLen, attrBuf, _ := ar2.marshalAttributesWithBuffers(a, sizes)
+	attrPtr, attrLen, attrBuf, values := ar2.marshalAttributesWithBuffers(a, sizes)
 	rv, _, _ = purego.SyscallN(c.fl.C_GetAttributeValue, uintptr(sh), uintptr(o), attrPtr, attrLen)
 	if err := toError(rv); err != nil {
 		return nil, err
 	}
 
-	return unmarshalAttributes(attrBuf, len(a)), nil
+	return unmarshalAttributes(attrBuf, values), nil
 }
 
 // SetAttributeValue calls C_SetAttributeValue.
