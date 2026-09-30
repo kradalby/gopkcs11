@@ -34,6 +34,16 @@ func (a *arena) free() {
 	a.pinner.Unpin()
 }
 
+// pinNonNull pins s and returns its address for a C call. Empty slices get a
+// placeholder: some modules reject NULL even with a zero length.
+func pinNonNull[T any](p *runtime.Pinner, s []T) uintptr {
+	if len(s) == 0 {
+		s = make([]T, 1)
+	}
+	p.Pin(&s[0])
+	return uintptr(unsafe.Pointer(&s[0]))
+}
+
 // marshalAttributes converts Go []*Attribute into a contiguous C-compatible
 // CK_ATTRIBUTE array. Returns the pointer to the array and its length.
 // The caller must keep the returned slices alive until after the C call.

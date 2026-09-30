@@ -177,3 +177,130 @@ func TestLargeAttribute(t *testing.T) {
 		t.Errorf("Large attribute value mismatch: got %d bytes, want %d", len(attrs[0].Value), len(largeValue))
 	}
 }
+
+func generateAESKey(t *testing.T, p *Ctx, session SessionHandle) ObjectHandle {
+	t.Helper()
+	key, err := p.GenerateKey(session,
+		[]*Mechanism{NewMechanism(CKM_AES_KEY_GEN, nil)},
+		[]*Attribute{
+			NewAttribute(CKA_CLASS, CKO_SECRET_KEY),
+			NewAttribute(CKA_KEY_TYPE, CKK_AES),
+			NewAttribute(CKA_TOKEN, false),
+			NewAttribute(CKA_ENCRYPT, true),
+			NewAttribute(CKA_DECRYPT, true),
+			NewAttribute(CKA_VALUE_LEN, 32),
+		})
+	if err != nil {
+		t.Fatalf("GenerateKey AES: %v", err)
+	}
+	return key
+}
+
+// TestMultiPartGCMDecrypt covers AEAD modules that withhold all plaintext
+// until DecryptFinal, so Final output is as large as the whole message.
+func TestMultiPartGCMDecrypt(t *testing.T) {
+	p := setenv(t)
+	slotID := initToken(t, p)
+	session := getSession(t, p, slotID)
+	defer finishSession(t, p, session)
+	key := generateAESKey(t, p, session)
+
+	plain := bytes.Repeat([]byte("A"), 1000)
+	iv := make([]byte, 12)
+	gcm := func() []*Mechanism {
+		return []*Mechanism{NewMechanism(CKM_AES_GCM, NewGCMParams(iv, nil, 128))}
+	}
+
+	if err := p.EncryptInit(session, gcm(), key); err != nil {
+		t.Fatalf("EncryptInit: %v", err)
+	}
+	cipher, err := p.Encrypt(session, plain)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	if err := p.DecryptInit(session, gcm(), key); err != nil {
+		t.Fatalf("DecryptInit: %v", err)
+	}
+	part, err := p.DecryptUpdate(session, cipher)
+	if err != nil {
+		t.Fatalf("DecryptUpdate: %v", err)
+	}
+	final, err := p.DecryptFinal(session)
+	if err != nil {
+		t.Fatalf("DecryptFinal: %v", err)
+	}
+	if got := append(part, final...); !bytes.Equal(got, plain) {
+		t.Errorf("decrypted %d bytes, want %d", len(got), len(plain))
+	}
+
+	// A failed Final leaves the operation active and the session unusable.
+	if err := p.DecryptInit(session, gcm(), key); err != nil {
+		t.Fatalf("DecryptInit after Final: %v", err)
+	}
+}
+
+// TestMultiPartEmptyOutput checks that calls whose output is empty still
+// reach the module; skipping them leaves the operation active.
+func TestMultiPartEmptyOutput(t *testing.T) {
+	p := setenv(t)
+	slotID := initToken(t, p)
+	session := getSession(t, p, slotID)
+	defer finishSession(t, p, session)
+	key := generateAESKey(t, p, session)
+
+	ecb := []*Mechanism{NewMechanism(CKM_AES_ECB, nil)}
+	plain := []byte("0123456789abcdef")
+
+	if err := p.EncryptInit(session, ecb, key); err != nil {
+		t.Fatalf("EncryptInit: %v", err)
+	}
+	cipher, err := p.EncryptUpdate(session, plain)
+	if err != nil {
+		t.Fatalf("EncryptUpdate: %v", err)
+	}
+	final, err := p.EncryptFinal(session)
+	if err != nil {
+		t.Fatalf("EncryptFinal: %v", err)
+	}
+	if len(final) != 0 {
+		t.Errorf("EncryptFinal = %d bytes, want 0", len(final))
+	}
+
+	if err := p.DecryptInit(session, ecb, key); err != nil {
+		t.Fatalf("DecryptInit after EncryptFinal: %v", err)
+	}
+	got, err := p.Decrypt(session, cipher)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Errorf("Decrypt = %q, want %q", got, plain)
+	}
+
+	// Empty plaintext: Decrypt produces nothing but must still finish.
+	iv := make([]byte, 12)
+	gcm := func() []*Mechanism {
+		return []*Mechanism{NewMechanism(CKM_AES_GCM, NewGCMParams(iv, nil, 128))}
+	}
+	if err := p.EncryptInit(session, gcm(), key); err != nil {
+		t.Fatalf("EncryptInit GCM: %v", err)
+	}
+	tag, err := p.Encrypt(session, nil)
+	if err != nil {
+		t.Fatalf("Encrypt GCM: %v", err)
+	}
+	if err := p.DecryptInit(session, gcm(), key); err != nil {
+		t.Fatalf("DecryptInit GCM: %v", err)
+	}
+	empty, err := p.Decrypt(session, tag)
+	if err != nil {
+		t.Fatalf("Decrypt GCM: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("Decrypt GCM = %d bytes, want 0", len(empty))
+	}
+	if err := p.DecryptInit(session, gcm(), key); err != nil {
+		t.Fatalf("DecryptInit after empty Decrypt: %v", err)
+	}
+}
