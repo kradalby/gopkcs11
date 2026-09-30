@@ -393,9 +393,14 @@ func (k *Key) Destroy() {
 
 // Pool wraps multiple Key instances for concurrent signing.
 type Pool struct {
-	signers    []*Key
-	totalCount int
-	cond       *sync.Cond
+	// public is fixed at construction so Public never needs a key, which
+	// may all be checked out.
+	public crypto.PublicKey
+	// free holds the idle keys; its capacity is the pool size.
+	free chan *Key
+	// destroyOnce keeps concurrent Destroys from each holding keys the
+	// other waits for.
+	destroyOnce sync.Once
 }
 
 // NewPool creates a Pool of n Key instances for concurrent signing.
@@ -417,43 +422,43 @@ func NewPool(n int, modulePath, tokenLabel, pin string, publicKey crypto.PublicK
 		keys = append(keys, k)
 	}
 
-	return &Pool{
-		signers:    keys,
-		totalCount: n,
-		cond:       sync.NewCond(&sync.Mutex{}),
-	}, nil
+	return newPool(publicKey, keys), nil
+}
+
+func newPool(public crypto.PublicKey, keys []*Key) *Pool {
+	free := make(chan *Key, len(keys))
+	for _, k := range keys {
+		free <- k
+	}
+	return &Pool{public: public, free: free}
 }
 
 // Public returns the public key.
 func (p *Pool) Public() crypto.PublicKey {
-	return p.signers[0].Public()
+	return p.public
 }
 
 // Sign acquires an available Key from the pool and signs.
 func (p *Pool) Sign(rand io.Reader, msg []byte, opts crypto.SignerOpts) ([]byte, error) {
-	p.cond.L.Lock()
-	for len(p.signers) == 0 {
-		p.cond.Wait()
-	}
-	k := p.signers[0]
-	p.signers = p.signers[1:]
-	p.cond.L.Unlock()
-
-	sig, err := k.Sign(rand, msg, opts)
-
-	p.cond.L.Lock()
-	p.signers = append(p.signers, k)
-	p.cond.L.Unlock()
-	p.cond.Signal()
-
-	return sig, err
+	k := <-p.free
+	defer func() { p.free <- k }()
+	return k.Sign(rand, msg, opts)
 }
 
-// Destroy destroys all keys in the pool.
+// Destroy destroys all keys in the pool, waiting for in-flight signs to
+// return theirs. The keys go back afterwards so a later Sign fails rather
+// than blocking forever.
 func (p *Pool) Destroy() {
-	for _, k := range p.signers {
-		k.Destroy()
-	}
+	p.destroyOnce.Do(func() {
+		keys := make([]*Key, cap(p.free))
+		for i := range keys {
+			keys[i] = <-p.free
+			keys[i].Destroy()
+		}
+		for _, k := range keys {
+			p.free <- k
+		}
+	})
 }
 
 // --- helpers ---

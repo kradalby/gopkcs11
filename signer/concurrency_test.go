@@ -130,3 +130,92 @@ func newAppLoginKey(t *testing.T, module *appLoginCtx, alwaysAuth bool) *Key {
 	k.alwaysAuthenticate = alwaysAuth
 	return k
 }
+
+// blockingCtx parks Sign until released, holding its key checked out.
+type blockingCtx struct {
+	mockCtx
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingCtx) Sign(_ pkcs11.SessionHandle, msg []byte) ([]byte, error) {
+	b.entered <- struct{}{}
+	<-b.release
+	return msg, nil
+}
+
+func newBlockingKey(t *testing.T) (*Key, *blockingCtx) {
+	t.Helper()
+	bc := &blockingCtx{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	k := &Key{module: bc, tokenLabel: "token label", pin: "unused", publicKey: testRSAPubKey}
+	if err := k.setup(); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	return k, bc
+}
+
+func isDestroyed(k *Key) bool {
+	k.sessionMu.Lock()
+	defer k.sessionMu.Unlock()
+	return k.session == nil
+}
+
+// crypto/tls calls Public during handshakes, possibly while every key is busy.
+func TestPoolPublicWhileAllKeysBusy(t *testing.T) {
+	k, bc := newBlockingKey(t)
+	p := newPool(testRSAPubKey, []*Key{k})
+
+	hash := sha256.Sum256([]byte("test"))
+	signed := make(chan struct{})
+	go func() {
+		defer close(signed)
+		p.Sign(rand.Reader, hash[:], crypto.SHA256)
+	}()
+	<-bc.entered
+	defer func() {
+		close(bc.release)
+		<-signed
+	}()
+
+	if got := p.Public(); got != testRSAPubKey {
+		t.Errorf("Public() = %v, want pool's public key", got)
+	}
+}
+
+func TestPoolDestroyWaitsForCheckedOutKeys(t *testing.T) {
+	busy, bc := newBlockingKey(t)
+	idle := setupMock(t, testRSAPubKey)
+	p := newPool(testRSAPubKey, []*Key{busy, idle})
+
+	hash := sha256.Sum256([]byte("test"))
+	var wg sync.WaitGroup
+	// Keys are handed out in order, so this checks out busy.
+	wg.Go(func() { p.Sign(rand.Reader, hash[:], crypto.SHA256) })
+	<-bc.entered
+
+	destroyed := make(chan struct{})
+	go func() {
+		defer close(destroyed)
+		p.Destroy()
+	}()
+
+	select {
+	case <-destroyed:
+		t.Error("Destroy returned while a key was checked out")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(bc.release)
+	<-destroyed
+	wg.Wait()
+
+	for i, k := range []*Key{busy, idle} {
+		if !isDestroyed(k) {
+			t.Errorf("key %d session still open after Destroy", i)
+		}
+	}
+
+	if _, err := p.Sign(rand.Reader, hash[:], crypto.SHA256); err == nil {
+		t.Error("Sign after Destroy succeeded")
+	}
+}
