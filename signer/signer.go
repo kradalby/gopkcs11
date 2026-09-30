@@ -37,8 +37,7 @@ type ctx interface {
 	Sign(sh pkcs11.SessionHandle, message []byte) ([]byte, error)
 }
 
-// modulesMu protects the modules map and is also used as a global lock
-// for alwaysAuthenticate login/logout cycles.
+// modulesMu protects the modules map.
 var modulesMu sync.Mutex
 
 // modules caches initialized PKCS#11 modules by path.
@@ -65,6 +64,33 @@ func initialize(modulePath string) (ctx, error) {
 	return p, nil
 }
 
+// Login state is per token for the whole application: a Logout on one
+// session logs out every session on that token. Calls that need the login
+// hold the token's lock for reading; always-authenticate re-logins hold it
+// for writing.
+var (
+	loginLocksMu sync.Mutex
+	loginLocks   = make(map[token]*sync.RWMutex)
+)
+
+// token identifies a token the way a Key finds it.
+type token struct {
+	module ctx
+	label  string
+}
+
+func loginLock(module ctx, label string) *sync.RWMutex {
+	loginLocksMu.Lock()
+	defer loginLocksMu.Unlock()
+	t := token{module, label}
+	l, ok := loginLocks[t]
+	if !ok {
+		l = new(sync.RWMutex)
+		loginLocks[t] = l
+	}
+	return l
+}
+
 // Key implements [crypto.Signer] using a private key stored on a PKCS#11 token.
 type Key struct {
 	module             ctx
@@ -75,6 +101,8 @@ type Key struct {
 	session            *pkcs11.SessionHandle
 	sessionMu          sync.Mutex
 	alwaysAuthenticate bool
+	// login is shared by every Key on the same token.
+	login *sync.RWMutex
 }
 
 // New creates a Key backed by a PKCS#11 private key.
@@ -100,6 +128,10 @@ func New(modulePath, tokenLabel, pin string, publicKey crypto.PublicKey) (*Key, 
 // setup opens a session, logs in, and finds the private key matching the
 // configured public key.
 func (k *Key) setup() error {
+	k.login = loginLock(k.module, k.tokenLabel)
+	k.login.RLock()
+	defer k.login.RUnlock()
+
 	session, err := k.openSession()
 	if err != nil {
 		return err
@@ -278,13 +310,15 @@ func (k *Key) Sign(_ io.Reader, msg []byte, opts crypto.SignerOpts) ([]byte, err
 	}
 
 	if k.alwaysAuthenticate {
-		modulesMu.Lock()
+		k.login.Lock()
+		defer k.login.Unlock()
 		k.module.Logout(*k.session) //nolint:errcheck,gosec // best-effort (G104)
 		if err := k.module.Login(*k.session, pkcs11.CKU_USER, k.pin); err != nil {
-			modulesMu.Unlock()
 			return nil, fmt.Errorf("pkcs11key: re-login: %w", err)
 		}
-		modulesMu.Unlock()
+	} else {
+		k.login.RLock()
+		defer k.login.RUnlock()
 	}
 
 	mechanism, signData, err := k.signingParams(msg, opts)
