@@ -59,7 +59,8 @@ func (g *GCMParams) IV() []byte {
 	return bytes.Clone(g.ops[len(g.ops)-1].iv)
 }
 
-// Free releases per-operation memory. No operation using g may be active.
+// Free releases the native memory each operation using g mapped; without
+// it that memory leaks. No operation using g may be active.
 func (g *GCMParams) Free() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
